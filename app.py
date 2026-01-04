@@ -1,6 +1,6 @@
-#Copyright @ISmartCoder
-#Updates Channel: https://t.me/TheSmartDev
-
+import os
+import asyncio
+import logging
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from pyrogram import Client
@@ -8,20 +8,21 @@ from pyrogram.enums import ParseMode, ChatType, UserStatus
 from pyrogram.errors import PeerIdInvalid, UsernameNotOccupied, ChannelInvalid
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse, FileResponse
-import asyncio
-import logging
 from contextlib import asynccontextmanager
-from config import API_ID, API_HASH, BOT_TOKEN
 
-# Configure LOGGER Module
+try:
+    from config import API_ID, API_HASH, BOT_TOKEN
+except ImportError:
+    API_ID = os.getenv("API_ID")
+    API_HASH = os.getenv("API_HASH")
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+
 logging.basicConfig(level=logging.INFO)
 LOGGER = logging.getLogger(__name__)
 
-# Global Client For Multi Event Loop Fix
 client = None
 
 def get_dc_locations():
-    """Custom DC Locations Measurement By @ISmartCoder"""
     return {
         1: "MIA, Miami, USA, US",
         2: "AMS, Amsterdam, Netherlands, NL",
@@ -41,7 +42,6 @@ def get_dc_locations():
     }
 
 def calculate_account_age(creation_date):
-    """Custom Function Age Calc"""
     today = datetime.now()
     delta = relativedelta(today, creation_date)
     years = delta.years
@@ -50,42 +50,56 @@ def calculate_account_age(creation_date):
     return f"{years} years, {months} months, {days} days"
 
 def estimate_account_creation_date(user_id):
-    """Approximate Results Get By @ISmartCoder"""
     reference_points = [
         (100000000, datetime(2013, 8, 1)),
         (1273841502, datetime(2020, 8, 13)),
         (1500000000, datetime(2021, 5, 1)),
         (2000000000, datetime(2022, 12, 1)),
     ]
-    
     closest_point = min(reference_points, key=lambda x: abs(x[0] - user_id))
     closest_user_id, closest_date = closest_point
-    
     id_difference = user_id - closest_user_id
     days_difference = id_difference / 20000000
     creation_date = closest_date + timedelta(days=days_difference)
-    
     return creation_date
 
 def format_user_status(status):
-    """Convert Status To String For JSON"""
     if not status:
         return "Unknown"
-    
     status_map = {
         UserStatus.ONLINE: "Online",
         UserStatus.OFFLINE: "Offline",
         UserStatus.RECENTLY: "Recently online",
         UserStatus.LAST_WEEK: "Last seen within week",
-        UserStatus.LAST_MONTH: "Last seen within month"
+        UserStatus.LAST_MONTH: "Last seen within month",
+        UserStatus.LONG_AGO: "Last seen long ago"
     }
     return status_map.get(status, "Unknown")
 
+def get_profile_photo_url(username, size=320):
+    if username:
+        username = username.strip('@')
+        return f"https://t.me/i/userpic/{size}/{username}.jpg"
+    return None
+
+def format_usernames_list(usernames):
+    if not usernames:
+        return []
+    formatted_usernames = []
+    for username_obj in usernames:
+        if hasattr(username_obj, 'username'):
+            formatted_usernames.append(username_obj.username)
+        else:
+            formatted_usernames.append(str(username_obj))
+    return formatted_usernames
+
 async def get_user_info(username):
-    """Fallback Function User To Bot"""
     try:
         DC_LOCATIONS = get_dc_locations()
         user = await client.get_users(username)
+        
+        full_user = await client.get_chat(username)
+        bio = getattr(full_user, 'bio', None)
         
         premium_status = getattr(user, 'is_premium', False)
         dc_location = DC_LOCATIONS.get(user.dc_id, "Unknown")
@@ -95,12 +109,22 @@ async def get_user_info(username):
         verified_status = getattr(user, 'is_verified', False)
         status = format_user_status(getattr(user, 'status', None))
         
-        # Scam Tag & Flags
         flags = "Clean"
         if getattr(user, 'is_scam', False):
             flags = "Scam"
         elif getattr(user, 'is_fake', False):
             flags = "Fake"
+        
+        profile_photo_url = get_profile_photo_url(user.username) if user.username else None
+        
+        last_online_date = None
+        next_offline_date = None
+        if hasattr(user, 'last_online_date') and user.last_online_date:
+            last_online_date = user.last_online_date.strftime("%B %d, %Y at %H:%M:%S")
+        if hasattr(user, 'next_offline_date') and user.next_offline_date:
+            next_offline_date = user.next_offline_date.strftime("%B %d, %Y at %H:%M:%S")
+        
+        usernames_list = format_usernames_list(getattr(user, 'usernames', []))
         
         user_data = {
             "success": True,
@@ -109,15 +133,24 @@ async def get_user_info(username):
             "first_name": user.first_name,
             "last_name": user.last_name,
             "username": user.username,
+            "usernames": usernames_list,
+            "bio": bio,
             "dc_id": user.dc_id,
             "dc_location": dc_location,
             "is_premium": premium_status,
             "is_verified": verified_status,
             "is_bot": user.is_bot,
+            "is_scam": getattr(user, 'is_scam', False),
+            "is_fake": getattr(user, 'is_fake', False),
+            "is_frozen": getattr(user, 'is_frozen', False),
+            "frozen_icon": getattr(user, 'frozen_icon', None),
             "flags": flags,
             "status": status,
+            "last_online_date": last_online_date,
+            "next_offline_date": next_offline_date,
             "account_created": account_created_str,
             "account_age": account_age,
+            "profile_photo_url": profile_photo_url,
             "api_dev": "@ISmartCoder",
             "api_updates": "https://t.me/TheSmartDev",
             "links": {
@@ -126,9 +159,7 @@ async def get_user_info(username):
                 "permanent": f"tg://user?id={user.id}"
             }
         }
-        
         return user_data
-        
     except (PeerIdInvalid, UsernameNotOccupied, IndexError):
         return {"success": False, "error": "User not found"}
     except Exception as e:
@@ -136,7 +167,6 @@ async def get_user_info(username):
         return {"success": False, "error": f"Failed to fetch user information: {str(e)}"}
 
 async def get_chat_info(username):
-    """Group Channel Fallback Functions"""
     try:
         DC_LOCATIONS = get_dc_locations()
         chat = await client.get_chat(username)
@@ -147,10 +177,11 @@ async def get_chat_info(username):
             ChatType.CHANNEL: "channel"
         }
         chat_type = chat_type_map.get(chat.type, "unknown")
-        
         dc_location = DC_LOCATIONS.get(getattr(chat, 'dc_id', None), "Unknown")
         
-        # Correct Link Generation 
+        profile_photo_url = get_profile_photo_url(chat.username) if chat.username else None
+        usernames_list = format_usernames_list(getattr(chat, 'usernames', []))
+        
         if chat.username:
             join_link = f"t.me/{chat.username}"
             permanent_link = f"t.me/{chat.username}"
@@ -162,16 +193,31 @@ async def get_chat_info(username):
             join_link = f"tg://resolve?domain={chat.id}"
             permanent_link = f"tg://resolve?domain={chat.id}"
         
+        flags = "Clean"
+        if getattr(chat, 'is_scam', False):
+            flags = "Scam"
+        elif getattr(chat, 'is_fake', False):
+            flags = "Fake"
+        
         chat_data = {
             "success": True,
             "type": chat_type,
             "id": chat.id,
             "title": chat.title,
             "username": chat.username,
+            "usernames": usernames_list,
+            "description": getattr(chat, 'description', None),
             "dc_id": getattr(chat, 'dc_id', None),
             "dc_location": dc_location,
             "members_count": getattr(chat, 'members_count', None),
-            "description": getattr(chat, 'description', None),
+            "is_verified": getattr(chat, 'is_verified', False),
+            "is_restricted": getattr(chat, 'is_restricted', False),
+            "is_scam": getattr(chat, 'is_scam', False),
+            "is_fake": getattr(chat, 'is_fake', False),
+            "is_frozen": getattr(chat, 'is_frozen', False),
+            "frozen_icon": getattr(chat, 'frozen_icon', None),
+            "flags": flags,
+            "profile_photo_url": profile_photo_url,
             "api_dev": "@ISmartCoder",
             "api_updates": "https://t.me/TheSmartDev",
             "links": {
@@ -179,9 +225,7 @@ async def get_chat_info(username):
                 "permanent": permanent_link
             }
         }
-        
         return chat_data
-        
     except (ChannelInvalid, PeerIdInvalid):
         return {"success": False, "error": "Chat not found or access denied"}
     except Exception as e:
@@ -189,37 +233,32 @@ async def get_chat_info(username):
         return {"success": False, "error": f"Failed to fetch chat information: {str(e)}"}
 
 async def get_telegram_info(username):
-    """All Entinity Capture @ISmartCoder"""
-    # Clean the username
     username = username.strip('@').replace('https://', '').replace('http://', '').replace('t.me/', '').replace('/', '').replace(':', '')
-    
     LOGGER.info(f"Fetching info for: {username}")
     
-    # UserBot To ChannelGroup Fallback
     user_info = await get_user_info(username)
     if user_info["success"]:
         return user_info
     
-    # Main Fallback For GC
     chat_info = await get_chat_info(username)
     if chat_info["success"]:
         return chat_info
     
-    # If both failed
-    return {"success": False, "error": "User Not Found In My Database"}
+    return {"success": False, "error": "Entity not found in Telegram database"}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Decorator Method For Conflict Remove By @ISmartCoder"""
     global client
     
-    # Startup
     LOGGER.info("Creating Bot Client From BOT_TOKEN")
+    os.makedirs("/tmp", exist_ok=True)
     client = Client(
         "GetUserInfo",
         api_id=API_ID,
         api_hash=API_HASH,
-        bot_token=BOT_TOKEN
+        bot_token=BOT_TOKEN,
+        workdir="/tmp",
+        in_memory=True
     )
     LOGGER.info("Bot Client Created Successfully!")
     
@@ -228,12 +267,10 @@ async def lifespan(app: FastAPI):
     
     yield
     
-    # Shutdown down pyro client
     if client:
         await client.stop()
         LOGGER.info("Pyrogram client stopped!")
 
-# Create FastAPI app with lifespan @ISmartCoder
 app = FastAPI(
     title="Telegram Info API",
     description="Get information about Telegram users, bots, channels, and groups",
@@ -242,16 +279,19 @@ app = FastAPI(
 )
 
 @app.get("/info")
-async def info_endpoint(username: str = Query(..., description="Username, user ID, or Telegram link")):
-    """API endpoint to get Telegram entity information"""
+async def info_endpoint(username: str = Query(..., description="Username, user ID, or Telegram link"), size: int = Query(320, description="Profile photo size")):
     try:
         result = await get_telegram_info(username)
+        
+        if result["success"] and "profile_photo_url" in result and result["profile_photo_url"]:
+            result["profile_photo_url"] = get_profile_photo_url(
+                result.get("username"), size
+            ) if result.get("username") else None
         
         if result["success"]:
             return result
         else:
             raise HTTPException(status_code=404, detail=result["error"])
-            
     except HTTPException:
         raise
     except Exception as e:
@@ -260,7 +300,6 @@ async def info_endpoint(username: str = Query(..., description="Username, user I
 
 @app.get("/health")
 async def health_check():
-    """Enhanced health check endpoint with detailed API information"""
     uptime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     bot_status = "connected" if client and client.is_connected else "disconnected"
     
@@ -272,7 +311,7 @@ async def health_check():
             "version": "1.0.0",
             "description": "Advanced Telegram entity information retrieval system",
             "uptime_check": uptime,
-            "bot_status": f"Pyrofork Client: {bot_status}",
+            "bot_status": f"Pyrogram Client: {bot_status}",
             "features": [
                 "User & Bot Information",
                 "Channel & Group Details",
@@ -280,7 +319,10 @@ async def health_check():
                 "Data Center Location",
                 "Premium Status Detection",
                 "Verification Status",
-                "Real-time Status Tracking"
+                "Real-time Status Tracking",
+                "Profile Photo URLs",
+                "Multiple Usernames Support",
+                "Bio Information"
             ]
         },
         "endpoints": {
@@ -292,7 +334,7 @@ async def health_check():
         },
         "developer": {
             "created_by": "@ISmartCoder",
-            "proudly_developed": " Proudly developed by @ISmartCoder ✅",
+            "proudly_developed": "Proudly developed by @ISmartCoder ✅",
             "updates_channel": "https://t.me/TheSmartDev",
             "support": "Join our updates channel for latest features!"
         },
@@ -300,36 +342,39 @@ async def health_check():
             "supported_entities": ["Users", "Bots", "Channels", "Groups", "Supergroups"],
             "data_centers": len(get_dc_locations()),
             "response_format": "JSON",
-            "authentication": "Bot Token Based"
+            "authentication": "Bot Token Based",
+            "deployment": "Vercel Ready with in-memory sessions"
         }
     }
 
 @app.get("/")
 async def root():
-    """Root endpoint serving status.html"""
     try:
         return FileResponse("status.html", media_type="text/html")
     except Exception as e:
-        # Fallback response if status.html is not found
         return {
-            "success": False,
-            "error": "status.html file not found",
-            "message": "Please create status.html file in the root directory",
-            "fallback_info": {
-                "api_name": "Telegram Info API",
-                "status": "Running",
-                "developer": "@ISmartCoder",
-                "updates_channel": "https://t.me/TheSmartDev"
-            }
+            "success": True,
+            "message": "Telegram Info API is running",
+            "api_name": "Telegram Info API",
+            "status": "Running",
+            "developer": "@ISmartCoder",
+            "updates_channel": "https://t.me/TheSmartDev",
+            "endpoints": {
+                "/info": "Get Telegram entity information (requires username parameter)",
+                "/health": "API health check and detailed information",
+                "/docs": "Interactive API documentation",
+                "/redoc": "Alternative API documentation"
+            },
+            "usage_example": "/info?username=telegram"
         }
 
 if __name__ == "__main__":
     import uvicorn
     LOGGER.info("Starting FastAPI server with Uvicorn...")
     uvicorn.run(
-        "app:app",
+        app,
         host="0.0.0.0",
-        port=5000,
+        port=int(os.getenv("PORT", 5000)),
         log_level="info",
         reload=False
     )
